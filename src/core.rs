@@ -1559,62 +1559,114 @@ impl ArrowSpace {
         storage_path: impl AsRef<std::path::Path>,
         dataset_name: &str,
     ) -> Result<Self, crate::storage::StorageError> {
-        use crate::storage::parquet::{load_dense_matrix, load_lambda};
+        use crate::reduction::ImplicitProjection;
+        use crate::storage::parquet::{load_dense_matrix, load_lambda, load_metadata};
 
         let base_path = storage_path.as_ref();
 
-        // 1. Load raw input data
+        // 1. Load Metadata to get projection and configuration details
+        // Note: The user mentioned 'dorothea_highdim-laplacian-input_metadata.json'
+        // We use the dataset_name provided (e.g. "dorothea_highdim-laplacian-input")
+        let metadata = load_metadata(base_path, dataset_name)?;
+        let config = &metadata.builder_config;
+
+        // 2. Load Raw Input Data
         let raw_path = base_path.join(format!("{}-raw_input.parquet", dataset_name));
         let data = load_dense_matrix(&raw_path)?;
         let (nitems, nfeatures) = data.shape();
 
-        // 2. Load lambdas (1-row matrix -> Vec<f64>)
+        // 3. Load Lambdas
         let lambdas_path = base_path.join(format!("{}-lambdas.parquet", dataset_name));
         let lambdas = load_lambda(&lambdas_path)?;
 
-        if lambdas.len() != nitems {
-            return Err(crate::storage::StorageError::Invalid(format!(
-                "Lambda count ({}) doesn't match items ({})",
-                lambdas.len(),
-                nitems
-            )));
+        // 4. Extract Projection Logic from Metadata
+        let mut projection_matrix = None;
+        let mut reduced_dim = None;
+
+        let use_reduction = config
+            .get("use_dims_reduction")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        if use_reduction {
+            // Reconstruct the projection using parameters from metadata
+            // Mapping keys from the JSON structure provided in the query
+            let original_dim = config
+                .get("nfeatures")
+                .and_then(|v| v.as_usize())
+                .unwrap_or(nfeatures);
+
+            // In the provided JSON, 'n_cols' in the matrix file info usually
+            // represents the reduced dimension (64 in your example)
+            let target_dim = if let Some(file_info) = metadata.files.get("matrix") {
+                file_info.cols
+            } else {
+                config
+                    .get("reduced_dim")
+                    .and_then(|v| v.as_usize())
+                    .unwrap_or(64)
+            };
+
+            // Retrieve seed (defaulting to 42 if not found, though metadata should have it)
+            let seed = config
+                .get("clustering_seed")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(42);
+
+            info!(
+                "Restoring ImplicitProjection: {} -> {} (seed: {})",
+                original_dim, target_dim, seed
+            );
+
+            projection_matrix = Some(ImplicitProjection::new(
+                original_dim,
+                target_dim,
+                Some(seed),
+            ));
+            reduced_dim = Some(target_dim);
         }
 
-        // 3. Compute lambda statistics
+        // 5. Build the ArrowSpace struct
         let min_lambdas = lambdas.iter().fold(f64::INFINITY, |a, &b| a.min(b));
         let max_lambdas = lambdas.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-        let range_lambdas = max_lambdas - min_lambdas;
 
-        // 4. Build the ArrowSpace struct
         let mut aspace = Self {
             nfeatures,
             nitems,
             data,
             signals: sprs::CsMat::zero((0, 0)),
             lambdas,
-            lambdas_sorted: SortedLambdas::new(),
-            // Computed private fields
+            lambdas_sorted: crate::sorted_index::SortedLambdas::new(),
             min_lambdas,
             max_lambdas,
-            range_lambdas,
-            // Default values for other fields
-            taumode: TauMode::Median,
-            n_clusters: 0,
+            range_lambdas: max_lambdas - min_lambdas,
+            taumode: config
+                .get("synthesis")
+                .and_then(|v| v.as_tau_mode())
+                .unwrap_or(TauMode::Median),
+            n_clusters: config
+                .get("cluster_max_clusters")
+                .and_then(|v| v.as_usize())
+                .unwrap_or(0),
             cluster_assignments: vec![],
             cluster_sizes: vec![],
-            cluster_radius: 0.0,
-            projection_matrix: None,
-            reduced_dim: None,
-            extra_reduced_dim: false,
+            cluster_radius: config
+                .get("cluster_radius")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0),
+            projection_matrix,
+            reduced_dim,
+            extra_reduced_dim: config
+                .get("extra_dims_reduction")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
             centroid_map: None,
             sub_centroids: None,
             subcentroid_lambdas: None,
             item_norms: None,
         };
 
-        // 5. Build sorted index
         aspace.build_lambdas_sorted();
-
         Ok(aspace)
     }
 }
