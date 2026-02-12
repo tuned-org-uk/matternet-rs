@@ -1,0 +1,9 @@
+[package]
+name = "surfface-pipeline"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+surfface-core = { version = "0.1.0", path = "../surfface-core" }
+
+burn = {workspace = true}

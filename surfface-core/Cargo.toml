@@ -1,0 +1,25 @@
+[package]
+name = "surfface-core"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "surfface_core"
+crate-type = ["rlib"]
+
+[dependencies]
+burn-ndarray = { version = "0.20.1", optional = true }
+burn-wgpu = { version = "0.20.1", optional = true }
+burn-cuda = { version = "0.20.1", optional = true }
+
+burn = { workspace = true }
+ndarray = { workspace = true }
+
+log = { workspace = true }
+env_logger = { workspace = true }
+
+[features]
+default = ["cpu"]
+cpu = ["burn-ndarray"]
+wgpu = ["burn-wgpu"]
+cuda = ["burn-cuda"]
