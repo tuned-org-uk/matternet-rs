@@ -1,41 +1,23 @@
+// surfface-core/src/mst.rs
 //! MST Skeleton stage: Build thickness-weighted transport network
 //!
 //! This is Stage B1 of the Surfface pipeline [file:4]:
 //! - Build sparse k-NN candidate graph between centroids
 //! - Compute thickness-weighted edge costs c_ij = d_ij * φ(t_i, t_j)
+//!   (surface cost: length × thickness, following Nature paper)
 //! - Extract MST using Prim's algorithm
 //! - Identify trunk (tree diameter) and produce 1D ordering
+//!
+//! Physical interpretation [https://www.nature.com/articles/s41586-025-09784-4](https://www.nature.com/articles/s41586-025-09784-4):
+//! - Thick centroids (high variance) = Core regions (trunk)
+//! - Thin centroids (low variance) = Peripheral regions (sprouts)
+//! - MST minimizes surface cost while maintaining connectivity
 //!
 //! The MST skeleton influences centroid state regularization (Stage B2)
 //! but does NOT merge into the statistical Laplacian (Stage C) [file:2]
 
 use crate::centroid::CentroidState;
 use crate::distance::bhattacharyya_distance_diagonal;
-/// Input: CentroidState [C, F] with variances
-///
-/// Step 1: Compute thickness proxy
-///   t_i = mean(variance[i, :])  # Average variance per centroid
-///
-/// Step 2: Build sparse candidate graph
-///   For each centroid i:
-///     Find k nearest neighbors using Bhattacharyya distance
-///     Add edge (i, j, d_ij, t_i, t_j)
-///
-/// Step 3: Compute edge costs
-///   c_ij = d_ij * (t_i + t_j) / 2
-///
-/// Step 4: Run MST (Prim or Kruskal)
-///   MST = minimum_spanning_tree(candidate_graph, costs=c)
-///
-/// Step 5: Trunk-sprouts traversal
-///   root = argmax(t_i)                    # Thickest centroid
-///   trunk = tree_diameter(MST, costs=c)   # Longest path
-///   order = dfs(MST, root, sort_children_by=thickness, descending=True)
-///
-/// Output:
-///   - centroid_order: Vec<usize>  [C]
-///   - mst_edges: Vec<(usize, usize, f32)>
-///   - trunk_nodes: Vec<usize>
 use burn::prelude::*;
 use std::collections::{BinaryHeap, VecDeque};
 
@@ -48,7 +30,10 @@ pub struct MSTConfig {
     /// Distance metric for edges
     pub distance_metric: DistanceMetric,
 
-    /// Thickness weighting function
+    /// Thickness weighting function φ(t_i, t_j)
+    ///
+    /// Surface cost interpretation: c_ij = distance * thickness
+    /// Higher thickness → higher surface cost per unit length
     pub thickness_weight: ThicknessWeight,
 
     /// Enable trunk identification via tree diameter
@@ -69,21 +54,23 @@ pub enum DistanceMetric {
 }
 
 /// Thickness weighting function φ(t_i, t_j)
+///
+/// Represents surface cost scaling: thicker edges cost more material
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ThicknessWeight {
-    /// Mean: (t_i + t_j) / 2
+    /// Mean: (t_i + t_j) / 2  [Default, matches Nature paper]
     Mean,
 
-    /// Minimum: min(t_i, t_j)
+    /// Minimum: min(t_i, t_j)  [Conservative, uses thinner endpoint]
     Min,
 
-    /// Maximum: max(t_i, t_j)
+    /// Maximum: max(t_i, t_j)  [Aggressive, uses thicker endpoint]
     Max,
 
-    /// Geometric mean: sqrt(t_i * t_j)
+    /// Geometric mean: sqrt(t_i * t_j)  [Balanced]
     GeometricMean,
 
-    /// No weighting: 1.0 (pure distance)
+    /// No weighting: 1.0 (pure distance, ignore thickness)
     None,
 }
 
@@ -168,17 +155,27 @@ pub struct MSTOutput {
 
     /// Total MST weight (sum of edge costs)
     pub total_weight: f32,
+
+    /// Number of nodes covered by MST
+    pub nodes_in_mst: usize,
 }
 
 impl MSTOutput {
     pub fn summary(&self) -> String {
         format!(
-            "MST: {} edges, total_weight={:.2}, trunk_len={}, order_len={}",
+            "MST: {} edges, weight={:.2}, trunk={}, order={}, coverage={}/{}",
             self.mst_edges.len(),
             self.total_weight,
             self.trunk_nodes.len(),
+            self.centroid_order.len(),
+            self.nodes_in_mst,
             self.centroid_order.len()
         )
+    }
+
+    /// Check if MST covers all centroids
+    pub fn is_connected(&self) -> bool {
+        self.nodes_in_mst == self.centroid_order.len()
     }
 }
 
@@ -204,13 +201,13 @@ impl MSTStage {
         log::info!("║  STAGE B1: MST SKELETON                               ║");
         log::info!("╚═══════════════════════════════════════════════════════╝");
         log::info!(
-            "🌲 Building MST for {} centroids (k={})",
+            "🌲 Building thickness-weighted MST for {} centroids (k={})",
             c,
             self.config.k_neighbors
         );
 
         // STEP 1: Compute thickness proxy
-        log::debug!("Step 1/5: Computing thickness...");
+        log::debug!("Step 1/5: Computing thickness (variance proxy)...");
         let thickness = self.compute_thickness(state);
         log::info!(
             "  ✓ Thickness: min={:.4}, max={:.4}, mean={:.4}",
@@ -229,16 +226,29 @@ impl MSTStage {
         );
 
         // STEP 3: Extract MST using Prim's algorithm
-        log::debug!("Step 3/5: Running Prim's MST...");
-        let (mst_edges, total_weight) = self.prim_mst(&candidate_edges, c);
-        log::info!(
-            "  ✓ MST: {} edges, total_weight={:.2}",
-            mst_edges.len(),
-            total_weight
-        );
+        log::debug!("Step 3/5: Running Prim's MST (surface cost minimization)...");
+        let (mst_edges, total_weight, nodes_in_mst) = self.prim_mst(&candidate_edges, c);
+
+        if nodes_in_mst < c {
+            log::warn!(
+                "  ⚠️  MST only covers {}/{} nodes (graph disconnected)",
+                nodes_in_mst,
+                c
+            );
+            log::warn!(
+                "     Consider increasing k_neighbors (current: {})",
+                self.config.k_neighbors
+            );
+        } else {
+            log::info!(
+                "  ✓ MST: {} edges, total_weight={:.2} (all nodes covered)",
+                mst_edges.len(),
+                total_weight
+            );
+        }
 
         // STEP 4: Identify trunk (tree diameter)
-        let trunk_nodes = if self.config.compute_trunk {
+        let trunk_nodes = if self.config.compute_trunk && nodes_in_mst > 1 {
             log::debug!("Step 4/5: Computing trunk (tree diameter)...");
             let trunk = self.compute_trunk(&mst_edges, &thickness, c);
             log::info!("  ✓ Trunk: {} nodes", trunk.len());
@@ -248,14 +258,17 @@ impl MSTStage {
             Vec::new()
         };
 
-        // STEP 5: DFS traversal for 1D ordering
-        log::debug!("Step 5/5: DFS traversal for centroid ordering...");
+        // STEP 5: DFS traversal for 1D ordering (trunk → sprouts)
+        log::debug!("Step 5/5: DFS traversal (thick → thin ordering)...");
         let centroid_order = self.dfs_ordering(&mst_edges, &thickness, c);
         log::info!("  ✓ Ordering: {} centroids", centroid_order.len());
 
         log::info!("╔═══════════════════════════════════════════════════════╗");
         log::info!("║  MST SKELETON COMPLETE                                ║");
         log::info!("╚═══════════════════════════════════════════════════════╝");
+        log::info!("  • Surface cost (total weight): {:.2}", total_weight);
+        log::info!("  • Trunk length: {} nodes", trunk_nodes.len());
+        log::info!("  • Connectivity: {}/{} nodes", nodes_in_mst, c);
 
         MSTOutput {
             candidate_edges,
@@ -264,6 +277,7 @@ impl MSTStage {
             trunk_nodes,
             thickness,
             total_weight,
+            nodes_in_mst,
         }
     }
 
@@ -364,21 +378,26 @@ impl MSTStage {
         }
     }
 
-    /// Compute edge cost with thickness weighting: c_ij = d_ij * φ(t_i, t_j)
+    /// Compute edge cost with thickness weighting
+    ///
+    /// Surface cost model: c_ij = distance * thickness
+    /// - Higher thickness → higher material cost per unit length
+    /// - MST minimizes total surface while maintaining connectivity
     fn compute_edge_cost(&self, distance: f32, t_i: f32, t_j: f32) -> f32 {
         let phi = match self.config.thickness_weight {
             ThicknessWeight::Mean => (t_i + t_j) / 2.0,
             ThicknessWeight::Min => t_i.min(t_j),
             ThicknessWeight::Max => t_i.max(t_j),
             ThicknessWeight::GeometricMean => (t_i * t_j).sqrt(),
-            ThicknessWeight::None => 1.0,
+            ThicknessWeight::None => return distance,
         };
 
+        // Surface cost: length × thickness
         distance * phi
     }
 
-    /// Prim's MST algorithm
-    fn prim_mst(&self, edges: &[Edge], n_nodes: usize) -> (Vec<Edge>, f32) {
+    /// Prim's MST algorithm with connectivity check
+    fn prim_mst(&self, edges: &[Edge], n_nodes: usize) -> (Vec<Edge>, f32, usize) {
         use std::cmp::Ordering;
 
         // Build adjacency list
@@ -462,10 +481,13 @@ impl MSTStage {
             .map(|idx| edges[idx].clone())
             .collect();
 
-        (mst_edges, total_weight)
+        // Count nodes in MST
+        let nodes_in_mst = in_mst.iter().filter(|&&x| x).count();
+
+        (mst_edges, total_weight, nodes_in_mst)
     }
 
-    /// Compute trunk via tree diameter (longest path)
+    /// Compute trunk via tree diameter (longest path in MST)
     fn compute_trunk(&self, mst_edges: &[Edge], thickness: &[f32], n_nodes: usize) -> Vec<usize> {
         if mst_edges.is_empty() {
             return Vec::new();
@@ -478,7 +500,7 @@ impl MSTStage {
             adj[edge.v].push((edge.u, edge.cost));
         }
 
-        // Find thickest node as starting point
+        // Find thickest node as starting point (core of network)
         let root = thickness
             .iter()
             .enumerate()
@@ -486,13 +508,11 @@ impl MSTStage {
             .map(|(i, _)| i)
             .unwrap_or(0);
 
-        // BFS to find farthest node from root
+        // Two-BFS algorithm for tree diameter
         let (farthest1, _) = self.bfs_farthest(&adj, root, n_nodes);
-
-        // BFS from farthest1 to find diameter endpoint
         let (farthest2, distances) = self.bfs_farthest(&adj, farthest1, n_nodes);
 
-        // Reconstruct path from farthest1 to farthest2
+        // Reconstruct trunk path
         let trunk = self.reconstruct_path(&adj, farthest1, farthest2, &distances);
 
         trunk
@@ -532,7 +552,7 @@ impl MSTStage {
         (farthest, distances)
     }
 
-    /// Reconstruct path between two nodes
+    /// Reconstruct path between two nodes (improved robustness)
     fn reconstruct_path(
         &self,
         adj: &[Vec<(usize, f32)>],
@@ -544,27 +564,41 @@ impl MSTStage {
         let mut current = end;
 
         while current != start {
-            let mut next = current;
+            // Find neighbor that best matches distance gradient
+            let mut next = None;
+            let mut best_residual = f32::INFINITY;
+
             for &(neighbor, cost) in &adj[current] {
-                if (distances[current] - distances[neighbor] - cost).abs() < 1e-6 {
-                    next = neighbor;
-                    break;
+                let expected_dist = distances[neighbor] + cost;
+                let residual = (distances[current] - expected_dist).abs();
+
+                if residual < best_residual {
+                    best_residual = residual;
+                    next = Some(neighbor);
                 }
             }
 
-            if next == current {
-                break; // Couldn't find path
+            match next {
+                Some(n) if best_residual < 1e-3 => {
+                    path.push(n);
+                    current = n;
+                }
+                _ => {
+                    log::warn!(
+                        "Path reconstruction failed at node {} (residual={:.6})",
+                        current,
+                        best_residual
+                    );
+                    break;
+                }
             }
-
-            path.push(next);
-            current = next;
         }
 
         path.reverse();
         path
     }
 
-    /// DFS traversal for 1D ordering (trunk-sprouts)
+    /// DFS traversal for 1D ordering (trunk → sprouts, thick → thin)
     fn dfs_ordering(&self, mst_edges: &[Edge], thickness: &[f32], n_nodes: usize) -> Vec<usize> {
         if mst_edges.is_empty() {
             return (0..n_nodes).collect();
@@ -577,12 +611,12 @@ impl MSTStage {
             adj[edge.v].push(edge.u);
         }
 
-        // Sort children by thickness (descending)
+        // Sort children by thickness (descending: thick → thin)
         for neighbors in &mut adj {
             neighbors.sort_by(|&a, &b| thickness[b].partial_cmp(&thickness[a]).unwrap());
         }
 
-        // Find root (thickest node)
+        // Find root: thickest node (core of network)
         let root = thickness
             .iter()
             .enumerate()
@@ -590,7 +624,9 @@ impl MSTStage {
             .map(|(i, _)| i)
             .unwrap_or(0);
 
-        // DFS
+        log::debug!("  Root node: {} (thickness={:.4})", root, thickness[root]);
+
+        // DFS: trunk → sprouts
         let mut order = Vec::new();
         let mut visited = vec![false; n_nodes];
         self.dfs_visit(root, &adj, &mut visited, &mut order);
