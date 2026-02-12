@@ -1,4 +1,3 @@
-// surfface-core/src/tests/test_centroid.rs
 use crate::backend::AutoBackend;
 use crate::centroid::CentroidState;
 use kalman_clustering::KalmanClusterer;

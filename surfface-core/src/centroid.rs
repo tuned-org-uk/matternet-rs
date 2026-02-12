@@ -55,8 +55,6 @@ impl<B: Backend> CentroidState<B> {
         }
     }
 
-    // surfface-core/src/centroid.rs
-
     /// Create from KalmanClusterer (convenience wrapper)
     pub fn from_kalman_clusterer(clusterer: &KalmanClusterer<B>, device: &B::Device) -> Self {
         // Export centroids as Vec<Vec<f32>>
