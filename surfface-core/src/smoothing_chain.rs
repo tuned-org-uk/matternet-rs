@@ -23,7 +23,7 @@ use burn::prelude::*;
 
 /// Configuration for Kalman smoothing
 #[derive(Debug, Clone)]
-pub struct KalmanConfig {
+pub struct SmoothingConfig {
     /// Process noise covariance Q (controls smoothness)
     /// Higher Q → more responsive to observations
     /// Lower Q → smoother trajectory
@@ -60,7 +60,7 @@ pub enum TransitionModel {
     TrunkAware { trunk_factor: f32 },
 }
 
-impl Default for KalmanConfig {
+impl Default for SmoothingConfig {
     fn default() -> Self {
         Self {
             process_noise: 0.01,    // Low process noise (smooth)
@@ -72,7 +72,7 @@ impl Default for KalmanConfig {
     }
 }
 
-impl KalmanConfig {
+impl SmoothingConfig {
     /// Conservative smoothing (trust observations more)
     pub fn conservative() -> Self {
         Self {
@@ -151,17 +151,17 @@ impl<B: Backend> KalmanOutput<B> {
 }
 
 /// Kalman smoothing stage executor
-pub struct KalmanStage {
-    config: KalmanConfig,
+pub struct SmoothingStage {
+    config: SmoothingConfig,
 }
 
-impl KalmanStage {
-    pub fn new(config: KalmanConfig) -> Self {
+impl SmoothingStage {
+    pub fn new(config: SmoothingConfig) -> Self {
         Self { config }
     }
 
     pub fn with_defaults() -> Self {
-        Self::new(KalmanConfig::default())
+        Self::new(SmoothingConfig::default())
     }
 
     /// Execute Kalman smoothing
@@ -222,18 +222,26 @@ impl KalmanStage {
         log::info!("║  KALMAN SMOOTHING COMPLETE                            ║");
         log::info!("╚═══════════════════════════════════════════════════════╝");
 
-        // Convert back to tensors with explicit type annotations
-        let smoothed_means_tensor =
-            Tensor::<B, 2>::from_floats(smoothed_means.as_slice(), &device).reshape([c, f]);
+        // Convert back to tensors using from_data with proper shapes
+        let smoothed_means_tensor = Tensor::<B, 2>::from_data(
+            burn::tensor::TensorData::new(smoothed_means, burn::tensor::Shape::new([c, f])),
+            &device,
+        );
 
-        let smoothed_vars_tensor =
-            Tensor::<B, 2>::from_floats(smoothed_vars.as_slice(), &device).reshape([c, f]);
+        let smoothed_vars_tensor = Tensor::<B, 2>::from_data(
+            burn::tensor::TensorData::new(smoothed_vars, burn::tensor::Shape::new([c, f])),
+            &device,
+        );
 
-        let filtered_means_tensor =
-            Tensor::<B, 2>::from_floats(filtered_means.as_slice(), &device).reshape([c, f]);
+        let filtered_means_tensor = Tensor::<B, 2>::from_data(
+            burn::tensor::TensorData::new(filtered_means, burn::tensor::Shape::new([c, f])),
+            &device,
+        );
 
-        let filtered_vars_tensor =
-            Tensor::<B, 2>::from_floats(filtered_vars.as_slice(), &device).reshape([c, f]);
+        let filtered_vars_tensor = Tensor::<B, 2>::from_data(
+            burn::tensor::TensorData::new(filtered_vars, burn::tensor::Shape::new([c, f])),
+            &device,
+        );
 
         KalmanOutput {
             smoothed_means: smoothed_means_tensor,
