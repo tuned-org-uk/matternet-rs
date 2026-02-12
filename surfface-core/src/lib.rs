@@ -11,11 +11,17 @@
 //    See the License for the specific language governing permissions and
 //    limitations under the License.
 pub mod backend;
+pub mod centroid;
 pub mod clustering;
 pub mod data;
 pub mod distance;
 pub mod laplacian;
 pub mod matrix;
+pub mod reduction;
+pub mod sparse;
+
+#[cfg(test)]
+mod tests;
 
 use std::sync::Once;
 

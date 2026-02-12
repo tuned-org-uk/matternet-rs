@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-surfface-core = { version = "0.1.0", path = "../surfface-core" }
+surfface-core = { version = "0.1.0", path = "../surfface-core", feature = ["storage"] }
 
 burn = {workspace = true}
+log = {workspace = true}
+env_logger = {workspace = true}
+rayon = {workspace = true}
+serde = {workspace = true}

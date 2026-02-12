@@ -8,8 +8,6 @@
 use log::{debug, info, trace, warn};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use smartcore::linalg::basic::arrays::{Array, Array2};
-use smartcore::linalg::basic::matrix::DenseMatrix;
 use std::collections::HashMap;
 use std::fmt::{self, Debug};
 use std::str::FromStr;
@@ -26,6 +24,9 @@ use crate::graph::GraphLaplacian;
 use crate::reduction::{ImplicitProjection, compute_jl_dimension};
 use crate::sampling::{InlineSampler, SamplerType};
 use crate::taumode::TauMode;
+
+use burn::prelude::*;
+use surfface_core::backend::{AutoBackend, SurffaceDevice, dispatch, print_backend_info};
 
 #[derive(Copy, Clone, Eq, PartialEq)]
 pub enum Pipeline {
@@ -48,7 +49,7 @@ impl FromStr for Pipeline {
 }
 
 #[derive(Clone, PartialEq)]
-pub struct ArrowSpaceBuilder {
+pub struct Builder {
     pub(crate) nitems: usize,
     pub(crate) nfeatures: usize,
     pub prebuilt_spectral: bool, // true if spectral laplacian has been computed
@@ -88,7 +89,7 @@ pub struct ArrowSpaceBuilder {
     pub(crate) persistence: Option<(String, std::path::PathBuf)>,
 }
 
-impl Default for ArrowSpaceBuilder {
+impl Default for Builder {
     fn default() -> Self {
         debug!("Creating ArrowSpaceBuilder with default parameters");
         Self {
@@ -124,7 +125,7 @@ impl Default for ArrowSpaceBuilder {
     }
 }
 
-impl ClusteringHeuristic for ArrowSpaceBuilder {
+impl ClusteringHeuristic for Builder {
     fn start_clustering(&mut self, rows: Vec<Vec<f64>>) -> ClusteredOutput {
         let n_items = rows.len();
         let n_features = rows.first().map(|r| r.len()).unwrap_or(0);
@@ -792,6 +793,28 @@ impl ArrowSpaceBuilder {
     }
 
     // -------------------- Build --------------------
+    pub fn build(data_vec: Vec<f32>, n_features: usize) {
+        // 1. Hardware Telemetry
+        print_backend_info();
+
+        use crate::execute_stages;
+
+        // 2. Dispatch to the right backend
+        dispatch(|device_variant| match device_variant {
+            SurffaceDevice::Cuda(d) => {
+                let device = *d.downcast::<<AutoBackend as Backend>::Device>().unwrap();
+                execute_stages::<AutoBackend>(data_vec, n_features, device);
+            }
+            SurffaceDevice::Wgpu(d) => {
+                let device = *d.downcast::<<AutoBackend as Backend>::Device>().unwrap();
+                execute_stages::<AutoBackend>(data_vec, n_features, device);
+            }
+            SurffaceDevice::Cpu(d) => {
+                let device = *d.downcast::<<AutoBackend as Backend>::Device>().unwrap();
+                execute_stages::<AutoBackend>(data_vec, n_features, device);
+            }
+        });
+    }
 
     /// Build the ArrowSpace and the selected Laplacian (if any).
     ///
@@ -805,7 +828,7 @@ impl ArrowSpaceBuilder {
     ///   unless with_synthesis was called, in which case the provided tau_mode and alpha are used.
     /// - If prebuilt or hypergraph graph is selected, standard Rayleigh lambdas are computed unless
     ///   with_synthesis was called, in which case synthetic lambdas are computed on that graph.
-    pub fn build(mut self, rows: Vec<Vec<f64>>) -> (ArrowSpace, GraphLaplacian) {
+    pub fn build_legacy(mut self, rows: Vec<Vec<f64>>) -> (ArrowSpace, GraphLaplacian) {
         let n_items = rows.len();
         self.nitems = n_items;
         let n_features = rows.first().map(|r| r.len()).unwrap_or(0);

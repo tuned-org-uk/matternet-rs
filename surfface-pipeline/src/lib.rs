@@ -1,9 +1,10 @@
+pub mod builder;
 pub mod stages;
 
 use burn::prelude::*;
 use surfface_core::backend::{AutoBackend, SurffaceDevice, dispatch, print_backend_info};
 
-pub fn run_pipeline(data_vec: Vec<f32>, n_features: usize) {
+pub fn build(data_vec: Vec<f32>, n_features: usize) {
     // 1. Hardware Telemetry
     print_backend_info();
 
@@ -28,7 +29,7 @@ pub fn run_pipeline(data_vec: Vec<f32>, n_features: usize) {
 /// 2. Clustering [file:5]
 /// 3. Kalman + MST [file:4]
 /// 4. Feature-Space Laplacian [file:3]
-fn execute_stages<B: Backend>(
+pub fn execute_stages<B: Backend>(
     data_vec: Vec<f32>,
     n_features: usize,
     device: <AutoBackend as Backend>::Device,
