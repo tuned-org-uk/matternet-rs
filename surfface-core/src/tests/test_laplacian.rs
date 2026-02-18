@@ -10,8 +10,6 @@ type TestBackend = AutoBackend;
 // ─────────────────────────────────────────────────────────────────────────────
 // Corrected Property Test: Spectral Bounds (λ ∈ [0, 2])
 // ─────────────────────────────────────────────────────────────────────────────
-
-use rand::prelude::*;
 use sprs::CsMat;
 
 #[test]

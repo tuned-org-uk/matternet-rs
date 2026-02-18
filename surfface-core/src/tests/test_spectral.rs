@@ -4,8 +4,8 @@ use crate::backend::{AutoBackend, get_device};
 use crate::centroid::CentroidState;
 use crate::laplacian::{LaplacianConfig, LaplacianOutput, LaplacianStage};
 use crate::spectral::{
-    compute_lambdas_gpu, dirichlet_dispersion_gpu, laplacian_to_tensor, rayleigh_quotient_gpu,
-    stage::compute_tau_mode_gpu,
+    bridge::compute_tau_mode_gpu, compute_lambdas_gpu, dirichlet_dispersion_gpu,
+    laplacian_to_tensor, rayleigh_quotient_gpu,
 };
 use approx::relative_eq;
 use burn::prelude::*;
@@ -182,4 +182,70 @@ fn test_zero_vector_safety() {
     let lambdas = compute_tau_mode_gpu(&lap, &data, 2, 2);
 
     assert!(lambdas.iter().all(|&v| v.is_finite()));
+}
+
+#[test]
+fn test_compute_lambdas_gpu_integration() {
+    crate::tests::init(); // Initialize logging and backend
+
+    // 1. Setup a 3x3 Laplacian: A simple chain graph 0-1-2
+    // L = [[1, -1, 0], [-1, 2, -1], [0, -1, 1]]
+    let mut tri = sprs::TriMat::new((3, 3));
+    tri.add_triplet(0, 0, 1.0);
+    tri.add_triplet(0, 1, -1.0);
+    tri.add_triplet(1, 0, -1.0);
+    tri.add_triplet(1, 1, 2.0);
+    tri.add_triplet(1, 2, -1.0);
+    tri.add_triplet(2, 1, -1.0);
+    tri.add_triplet(2, 2, 1.0);
+    let sparse_l = tri.to_csr();
+
+    // Upload to GPU
+    let l_gpu = laplacian_to_tensor(&sparse_l, 3);
+
+    // 2. Define 2 items with 3 features each
+    // Item 0: [1, 1, 1] -> Constant vector (Rayleigh should be 0)
+    // Item 1: [1, 0, -1] -> High gradient (Rayleigh should be high)
+    let n_items = 2;
+    let n_features = 3;
+    let item_data = vec![
+        1.0, 1.0, 1.0, // Item 0
+        1.0, 0.0, -1.0, // Item 1
+    ];
+
+    // 3. Compute λ = Rayleigh + Dirichlet on GPU
+    let lambdas = compute_lambdas_gpu(&l_gpu, &item_data, n_items, n_features);
+
+    // 4. Assertions
+    assert_eq!(lambdas.len(), n_items);
+
+    // Item 0 is constant: L * [1,1,1] = [0,0,0]. Rayleigh = 0.
+    // Dirichlet for constant vector is also 0.
+    assert!(
+        lambdas[0].abs() < 1e-5,
+        "Constant vector should have λ ≈ 0, got {}",
+        lambdas[0]
+    );
+
+    // Item 1 has high variance relative to the graph:
+    // Rayleigh(L, [1,0,-1]) = [1,0,-1] * [1,-2,1] / 2 = (1+0-1)/2 = 0?
+    // Wait, L * [1,0,-1] = [1, -1-1, 1] = [1, -2, 1].
+    // x^T L x = 1(1) + 0(-2) + (-1)(1) = 0.
+    // However, Dirichlet dispersion extracts W = max(0, -L).
+    // W = [[0, 1, 0], [1, 0, 1], [0, 1, 0]].
+    // Dirichlet will be non-zero for [1, 0, -1].
+    assert!(
+        lambdas[1] > lambdas[0],
+        "High gradient vector should have higher λ than constant vector"
+    );
+
+    // Ensure all values are finite and not NaN
+    for (i, val) in lambdas.iter().enumerate() {
+        assert!(
+            val.is_finite(),
+            "Lambda at index {} is not finite: {}",
+            i,
+            val
+        );
+    }
 }

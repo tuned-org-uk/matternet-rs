@@ -14,7 +14,7 @@
 //!   .squeeze_dims::<D2>(&[isize]) → removes multiple named dims
 //!
 //! Rule used here: sum_dim(1) on [N, F] → [N, 1], then squeeze_dim::<1>(1) → [N].
-pub mod stage;
+pub mod bridge;
 
 use burn::prelude::*;
 use log::{debug, info, trace};
