@@ -19,7 +19,9 @@ kalman_clustering = "0.3.0"
 
 burn = { workspace = true }
 rayon = { workspace = true }
+sprs = { workspace = true }
 dashmap = { workspace = true }
+approx = { workspace = true }
 ndarray = { workspace = true }
 serde = { workspace = true }
 log = { workspace = true }

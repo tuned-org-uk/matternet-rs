@@ -21,7 +21,8 @@ pub mod mst;
 pub mod preflight;
 pub mod reduction;
 pub mod smoothing_chain;
-pub mod sparse_mst;
+pub mod spectral;
+pub mod taumode;
 
 #[cfg(test)]
 mod tests;

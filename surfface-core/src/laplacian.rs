@@ -81,9 +81,9 @@ impl Default for LaplacianConfig {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Output of Stage C.
-pub struct LaplacianOutput<B: Backend> {
+pub struct LaplacianOutput {
     /// Symmetric (normalized or unnormalized) Laplacian matrix [F, F].
-    pub matrix: Tensor<B, 2>,
+    pub matrix: sprs::CsMat<f32>,
 
     /// Number of feature nodes F.
     pub n_features: usize,
@@ -98,7 +98,7 @@ pub struct LaplacianOutput<B: Backend> {
     pub sparsity: f32,
 }
 
-impl<B: Backend> LaplacianOutput<B> {
+impl LaplacianOutput {
     pub fn summary(&self) -> String {
         format!(
             "LaplacianOutput: F={}, nnz={}, sparsity={:.2}%, normalized={}",
@@ -132,7 +132,7 @@ impl LaplacianStage {
     ///
     /// Input:  smoothed CentroidState with means [C, F] and variances [C, F].
     /// Output: LaplacianOutput containing L[F, F].
-    pub fn execute<B: Backend>(&self, state: &CentroidState<B>) -> LaplacianOutput<B> {
+    pub fn execute<B: Backend>(&self, state: &CentroidState<B>) -> LaplacianOutput {
         let device = state.means.device();
         let shape = state.means.dims(); // [C, F]
         let c = shape[0];
@@ -202,6 +202,21 @@ impl LaplacianStage {
             burn::tensor::TensorData::new(matrix_flat, burn::tensor::Shape::new([f, f])),
             &device,
         );
+
+        // One-liner: Tensor<AutoBackend, 2> [F, F]  →  CsMat<f32>
+        // Place this immediately after your existing matrix tensor construction.
+
+        let matrix: sprs::CsMat<f32> = {
+            let flat: Vec<f32> = matrix.to_data().to_vec().unwrap();
+            let mut tri = sprs::TriMat::new((f, f));
+            flat.chunks(f).enumerate().for_each(|(r, row)| {
+                row.iter()
+                    .enumerate()
+                    .filter(|(_, v)| v.abs() > 1e-9)
+                    .for_each(|(c, &v)| tri.add_triplet(r, c, v));
+            });
+            tri.to_csr()
+        };
 
         LaplacianOutput {
             matrix,
