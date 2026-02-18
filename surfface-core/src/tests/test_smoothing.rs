@@ -27,7 +27,7 @@ fn create_noisy_centroids(c: usize, f: usize, noise_level: f32) -> CentroidState
         }
     }
     let variances = vec![noise_level * noise_level; c * f];
-    let counts = vec![10i32; c];
+    let counts = vec![10i64; c];
 
     CentroidState {
         means: Tensor::<TestBackend, 2>::from_data(
@@ -159,8 +159,8 @@ fn test_kalman_preserves_counts() {
 
     let output = SmoothingStage::new(SmoothingConfig::default()).execute(&noisy_state, &mst_output);
 
-    let input_counts: Vec<i32> = noisy_state.counts.to_data().to_vec().unwrap();
-    let output_counts: Vec<i32> = output.counts.to_data().to_vec().unwrap();
+    let input_counts: Vec<i64> = noisy_state.counts.to_data().to_vec().unwrap();
+    let output_counts: Vec<i64> = output.counts.to_data().to_vec().unwrap();
 
     assert_eq!(
         input_counts, output_counts,
@@ -364,8 +364,8 @@ fn test_kalman_to_centroid_state() {
     assert_eq!(smoothed_state.num_centroids(), c);
     assert_eq!(smoothed_state.feature_dim(), f);
 
-    let original_counts: Vec<i32> = noisy_state.counts.to_data().to_vec().unwrap();
-    let smoothed_counts: Vec<i32> = smoothed_state.counts.to_data().to_vec().unwrap();
+    let original_counts: Vec<i64> = noisy_state.counts.to_data().to_vec().unwrap();
+    let smoothed_counts: Vec<i64> = smoothed_state.counts.to_data().to_vec().unwrap();
     assert_eq!(original_counts, smoothed_counts, "Counts must be preserved");
 }
 
