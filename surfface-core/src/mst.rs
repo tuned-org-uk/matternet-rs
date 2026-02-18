@@ -19,7 +19,7 @@
 use crate::centroid::CentroidState;
 use crate::distance::bhattacharyya_distance_diagonal;
 use burn::prelude::*;
-use std::collections::{BinaryHeap, VecDeque};
+use std::collections::{BinaryHeap, HashSet, VecDeque};
 
 /// Configuration for MST skeleton construction
 #[derive(Debug, Clone)]
@@ -150,6 +150,11 @@ pub struct MSTOutput {
     /// Trunk node indices (longest path in tree)
     pub trunk_nodes: Vec<usize>,
 
+    /// Edges that lie on the MST diameter path (trunk).
+    /// Stored as (parent, child) pairs in traversal order.
+    /// Empty if trunk extraction was not performed.
+    pub trunk_edges: HashSet<(usize, usize)>,
+
     /// Thickness per centroid
     pub thickness: Vec<f32>,
 
@@ -258,6 +263,16 @@ impl MSTStage {
             Vec::new()
         };
 
+        // Derive trunk_edges from the ordered trunk_nodes path.
+        // Both directions are inserted because MST edges are undirected,
+        // so (u, v) and (v, u) must both match a forward-pass lookup.
+        let trunk_edges: HashSet<(usize, usize)> = trunk_nodes
+            .windows(2)
+            .flat_map(|w| [(w[0], w[1]), (w[1], w[0])])
+            .collect();
+
+        log::info!("  ✓ Trunk edges: {} (bidirectional)", trunk_edges.len() / 2);
+
         // STEP 5: DFS traversal for 1D ordering (trunk → sprouts)
         log::debug!("Step 5/5: DFS traversal (thick → thin ordering)...");
         let centroid_order = self.dfs_ordering(&mst_edges, &thickness, c);
@@ -268,6 +283,10 @@ impl MSTStage {
         log::info!("╚═══════════════════════════════════════════════════════╝");
         log::info!("  • Surface cost (total weight): {:.2}", total_weight);
         log::info!("  • Trunk length: {} nodes", trunk_nodes.len());
+        log::info!(
+            "  • Trunk edges: {} (bidirectional pairs)",
+            trunk_edges.len() / 2
+        );
         log::info!("  • Connectivity: {}/{} nodes", nodes_in_mst, c);
 
         MSTOutput {
@@ -275,6 +294,7 @@ impl MSTStage {
             mst_edges,
             centroid_order,
             trunk_nodes,
+            trunk_edges,
             thickness,
             total_weight,
             nodes_in_mst,
