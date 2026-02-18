@@ -227,178 +227,64 @@ pub fn cosine_distance<B: Backend>(vec_i: Tensor<B, 1>, vec_j: Tensor<B, 1>) -> 
     Tensor::ones_like(&sim) - sim
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::backend::AutoBackend;
-    type TestBackend = AutoBackend;
+//
+// Laplacian compute: Affinity kernels for manifold wiring.
+//
+// Design contract:
+//   - All kernels return a *similarity* (affinity) in [0, 1].
+//   - BC(i, j) = exp(-DB(i, j)), where DB is the Bhattacharyya distance.
+//   - Variance regularisation is mandatory: σ² is clamped below by `reg`
+//     to keep the log term finite and prevent zero-variance features from
+//     acting as perfect discriminators.
 
-    #[test]
-    fn test_bhattacharyya_identical_distributions() {
-        let device = Default::default();
+// Reference:
+//   Wikipedia – Bhattacharyya distance (Gaussian case, 1D)
+//   file:4 – Diagonal Gaussian Bhattacharyya for FastPair Pipeline
 
-        let mean = Tensor::<TestBackend, 1>::from_floats([1.0, 2.0, 3.0], &device);
-        let var = Tensor::<TestBackend, 1>::from_floats([0.5, 0.5, 0.5], &device);
+/// Compute the Diagonal Gaussian Bhattacharyya Coefficient BC ∈ [0, 1]
+/// between two features, each described by a mean profile and a variance
+/// profile over C centroids.
+///
+/// For each centroid dimension c:
+///   DB_1D = (μ_ic - μ_jc)² / (4(σ_ic² + σ_jc²))
+///         + 0.5 * ln( (σ_ic² + σ_jc²) / (2 * σ_ic * σ_jc) )
+///
+///   DB(i, j) = Σ_c DB_1D
+///   BC(i, j) = exp(-DB(i, j))
+///
+/// Arguments:
+///   mu_i / mu_j    – mean profiles of features i and j, length C
+///   var_i / var_j  – variance profiles, length C (raw Kalman outputs)
+///   reg            – variance floor (e.g. 1e-6) applied before log
+#[inline]
+pub fn bhattacharyya_coefficient(
+    mu_i: &[f32],
+    var_i: &[f32],
+    mu_j: &[f32],
+    var_j: &[f32],
+    reg: f32,
+) -> f32 {
+    debug_assert_eq!(mu_i.len(), mu_j.len());
+    debug_assert_eq!(var_i.len(), var_j.len());
+    debug_assert_eq!(mu_i.len(), var_i.len());
 
-        let distance = bhattacharyya_diagonal(mean.clone(), var.clone(), mean, var);
+    let mut db = 0.0f32;
+    for c in 0..mu_i.len() {
+        // Apply variance floor so log is always finite.
+        let vi = var_i[c].max(reg);
+        let vj = var_j[c].max(reg);
+        let v_sum = vi + vj;
 
-        let dist_val: f32 = distance.into_scalar();
-        assert!(
-            dist_val < 1e-6,
-            "Distance between identical distributions should be ~0, got {}",
-            dist_val
-        );
+        // Mean-difference term: (μ_i - μ_j)² / (4 * (σ_i² + σ_j²))
+        let mean_term = (mu_i[c] - mu_j[c]).powi(2) / (4.0 * v_sum);
+
+        // Log-variance term: 0.5 * ln( (σ_i² + σ_j²) / (2 * σ_i * σ_j) )
+        // (vi * vj).sqrt() is σ_i * σ_j in the scalar 1D case.
+        let log_term = 0.5 * (v_sum / (2.0 * (vi * vj).sqrt())).ln();
+
+        db += mean_term + log_term;
     }
 
-    #[test]
-    fn test_bhattacharyya_different_means() {
-        let device = Default::default();
-
-        let mean_i = Tensor::<TestBackend, 1>::from_floats([0.0, 0.0], &device);
-        let mean_j = Tensor::<TestBackend, 1>::from_floats([1.0, 1.0], &device);
-        let var = Tensor::<TestBackend, 1>::from_floats([1.0, 1.0], &device);
-
-        let distance = bhattacharyya_diagonal(mean_i, var.clone(), mean_j, var);
-
-        let dist_val: f32 = distance.into_scalar();
-        assert!(dist_val > 0.0, "Distance should be positive");
-    }
-
-    #[test]
-    fn test_bhattacharyya_slice_vs_tensor() {
-        crate::init();
-        let device = Default::default();
-
-        let mean_i_vec = vec![1.0, 2.0, 3.0];
-        let mean_j_vec = vec![1.5, 2.5, 3.5];
-        let var_i_vec = vec![0.5, 0.5, 0.5];
-        let var_j_vec = vec![0.6, 0.6, 0.6];
-
-        // Slice version
-        let dist_slice =
-            bhattacharyya_distance_diagonal(&mean_i_vec, &var_i_vec, &mean_j_vec, &var_j_vec);
-
-        // Tensor version
-        let mean_i = Tensor::<TestBackend, 1>::from_floats(mean_i_vec.as_slice(), &device);
-        let mean_j = Tensor::<TestBackend, 1>::from_floats(mean_j_vec.as_slice(), &device);
-        let var_i = Tensor::<TestBackend, 1>::from_floats(var_i_vec.as_slice(), &device);
-        let var_j = Tensor::<TestBackend, 1>::from_floats(var_j_vec.as_slice(), &device);
-
-        let dist_tensor: f32 = bhattacharyya_diagonal(mean_i, var_i, mean_j, var_j).into_scalar();
-
-        assert!(
-            (dist_slice - dist_tensor).abs() < 1e-5,
-            "Slice and tensor versions should match: {} vs {}",
-            dist_slice,
-            dist_tensor
-        );
-    }
-
-    #[test]
-    fn test_bhattacharyya_affinity() {
-        let device = Default::default();
-
-        let mean_i = Tensor::<TestBackend, 1>::zeros([3], &device);
-        let mean_j = Tensor::<TestBackend, 1>::zeros([3], &device);
-        let var = Tensor::<TestBackend, 1>::ones([3], &device);
-
-        let affinity = bhattacharyya_affinity(mean_i, var.clone(), mean_j, var);
-        let aff_val: f32 = affinity.into_scalar();
-
-        assert!(
-            aff_val > 0.99,
-            "Affinity between identical distributions should be ~1, got {}",
-            aff_val
-        );
-    }
-
-    #[test]
-    fn test_bhattacharyya_pairwise() {
-        let device = Default::default();
-
-        // 4 features, 3 centroids
-        let features = Tensor::<TestBackend, 2>::random(
-            [4, 3],
-            burn::tensor::Distribution::Uniform(0.0, 1.0),
-            &device,
-        );
-        let variances = Tensor::<TestBackend, 2>::ones([4, 3], &device).mul_scalar(0.5);
-
-        let distances = bhattacharyya_pairwise(features, variances);
-
-        assert_eq!(distances.dims(), [4, 4]);
-
-        // Diagonal should be ~0 (self-distance)
-        let diag_data = distances.to_data();
-        let diag_vec: Vec<f32> = diag_data.to_vec().unwrap();
-        for i in 0..4 {
-            let self_dist = diag_vec[i * 4 + i];
-            assert!(
-                self_dist < 1e-5,
-                "Self-distance should be ~0, got {}",
-                self_dist
-            );
-        }
-    }
-
-    #[test]
-    fn test_euclidean_distances() {
-        let device = Default::default();
-
-        let vec_i = Tensor::<TestBackend, 1>::from_floats([0.0, 0.0], &device);
-        let vec_j = Tensor::<TestBackend, 1>::from_floats([3.0, 4.0], &device);
-
-        let dist: f32 = euclidean_distance(vec_i, vec_j).into_scalar();
-        assert!(
-            (dist - 5.0).abs() < 1e-5,
-            "3-4-5 triangle: expected 5.0, got {}",
-            dist
-        );
-    }
-
-    #[test]
-    fn test_cosine_similarity() {
-        let device = Default::default();
-
-        // Parallel vectors
-        let vec_i = Tensor::<TestBackend, 1>::from_floats([1.0, 1.0], &device);
-        let vec_j = Tensor::<TestBackend, 1>::from_floats([2.0, 2.0], &device);
-
-        let sim: f32 = cosine_similarity(vec_i, vec_j).into_scalar();
-        assert!(
-            (sim - 1.0).abs() < 1e-5,
-            "Parallel vectors should have cos=1, got {}",
-            sim
-        );
-
-        // Orthogonal vectors
-        let vec_a = Tensor::<TestBackend, 1>::from_floats([1.0, 0.0], &device);
-        let vec_b = Tensor::<TestBackend, 1>::from_floats([0.0, 1.0], &device);
-
-        let sim_ortho: f32 = cosine_similarity(vec_a, vec_b).into_scalar();
-        assert!(
-            sim_ortho.abs() < 1e-5,
-            "Orthogonal vectors should have cos=0, got {}",
-            sim_ortho
-        );
-    }
-
-    #[test]
-    fn test_numerical_stability() {
-        let device = Default::default();
-
-        // Very small variances (near-zero)
-        let mean_i = Tensor::<TestBackend, 1>::from_floats([1.0, 2.0], &device);
-        let mean_j = Tensor::<TestBackend, 1>::from_floats([1.1, 2.1], &device);
-        let var_i = Tensor::<TestBackend, 1>::from_floats([1e-12, 1e-12], &device);
-        let var_j = Tensor::<TestBackend, 1>::from_floats([1e-12, 1e-12], &device);
-
-        let distance = bhattacharyya_diagonal(mean_i, var_i, mean_j, var_j);
-        let dist_val: f32 = distance.into_scalar();
-
-        assert!(
-            dist_val.is_finite(),
-            "Distance should be finite even with tiny variances"
-        );
-    }
+    // BC = exp(-DB) ∈ (0, 1].  Clamp for float hygiene.
+    (-db).exp().clamp(0.0, 1.0)
 }

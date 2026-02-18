@@ -1,3 +1,10 @@
+/// The only theoretical "trap" in this implementation is the assumption that mst_output.centroid_order
+///  is a single contiguous chain. If the MST construction in B1 produces a forest (multiple disconnected components),
+///  the smoother will treat the transition between the end of one tree and the start of another as a "step" in time.
+/// Recommendation: In a future iteration, you might check if order[t] and order[prev_t] are actually adjacent
+///  in the MST. If they aren't, you could reset the Kalman filter at that step (treating it as a new $t=0$).
+///  However, for the current "Stage B2" scope, the linear traversal of the centroid_order is the standard
+///  and expected behavior.
 use std::collections::HashSet;
 
 use crate::backend::AutoBackend;

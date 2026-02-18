@@ -114,7 +114,7 @@ fn test_thickness() {
     let device = Default::default();
 
     let centroids = Tensor::<TestBackend, 2>::ones([5, 10], &device);
-    let variances = Tensor::<TestBackend, 2>::ones([5, 10], &device).mul_scalar(0.2);
+    let _variances = Tensor::<TestBackend, 2>::ones([5, 10], &device).mul_scalar(0.2);
     let counts = Tensor::<TestBackend, 1, Int>::ones([5], &device);
 
     let state = CentroidState::from_clustering(centroids, counts, 0.2);
@@ -167,7 +167,7 @@ fn test_get_feature_variances() {
     let device = Default::default();
 
     let centroids = Tensor::<TestBackend, 2>::ones([5, 10], &device);
-    let variances = Tensor::<TestBackend, 2>::ones([5, 10], &device).mul_scalar(0.3);
+    let _variances = Tensor::<TestBackend, 2>::ones([5, 10], &device).mul_scalar(0.3);
     let counts = Tensor::<TestBackend, 1, Int>::ones([5], &device);
 
     let state = CentroidState::from_clustering(centroids, counts, 0.3);
